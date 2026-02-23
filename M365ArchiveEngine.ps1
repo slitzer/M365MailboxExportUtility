@@ -7,7 +7,7 @@ param(
 
     # Accept common mistaken param names so the script doesn't hard-fail
     [Parameter(Mandatory=$true)]
-    [Alias("logdir","logpath","runlogpath")]
+    [Alias("logpath","runlogpath")]
     [string] $LogDir,
 
     [switch] $IncludeSubfolders,
