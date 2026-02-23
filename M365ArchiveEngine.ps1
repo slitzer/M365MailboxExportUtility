@@ -5,10 +5,14 @@ param(
     [Parameter(Mandatory=$false)][string] $ClientMapPath = "",
     [Parameter(Mandatory=$true)][string] $OutRoot,
 
-    # Accept common mistaken param names so the script doesn't hard-fail
-    [Parameter(Mandatory=$true)]
-    [Alias("logpath","runlogpath","runlogfile")]
+    [Parameter(Mandatory=$false)]
+    [Alias("logpath")]
     [string] $LogDir,
+
+    # Backward compatibility with legacy callers that pass a log file/path argument.
+    [Parameter(Mandatory=$false)]
+    [Alias("runlogpath")]
+    [string] $RunLogFile,
 
     [switch] $IncludeSubfolders,
     [switch] $DryRun,
@@ -18,9 +22,18 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-# If someone passed a log FILE path (e.g. C:\...\something.log), convert to its folder
+# Support either -LogDir or legacy -RunLogFile/-RunLogPath inputs.
+if ([string]::IsNullOrWhiteSpace($LogDir) -and -not [string]::IsNullOrWhiteSpace($RunLogFile)) {
+    $LogDir = $RunLogFile
+}
+
+# If someone passed a log FILE path (e.g. C:\...\something.log), convert to its folder.
 if ($LogDir -match '\.log$') {
     $LogDir = Split-Path -Path $LogDir -Parent
+}
+
+if ([string]::IsNullOrWhiteSpace($LogDir)) {
+    throw "Missing required log output path. Provide -LogDir (preferred) or legacy -RunLogFile/-RunLogPath."
 }
 
 # -----------------------------
