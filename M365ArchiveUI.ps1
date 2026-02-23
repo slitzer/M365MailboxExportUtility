@@ -333,7 +333,7 @@ $xaml = @"
             <TextBox  Name="txtTenant" Grid.Row="6" Grid.Column="1" Text=""/>
 
             <StackPanel Grid.Row="7" Grid.Column="1" Orientation="Horizontal" Margin="0,6,0,0">
-              <CheckBox Name="chkDevice" Content="Use Device Code login" Margin="0,0,18,0" IsChecked="True"/>
+              <CheckBox Name="chkDevice" Content="Use Device Code login" Margin="0,0,18,0" IsChecked="False"/>
               <CheckBox Name="chkRecurse" Content="Include subfolders" Margin="0,0,18,0"/>
               <CheckBox Name="chkDry" Content="Dry Run" IsChecked="True"/>
             </StackPanel>
