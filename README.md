@@ -101,6 +101,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\M365ArchiveEngine.ps1 \
 - `-ClientMapPath` (optional): mapping CSV path.
 - `-OutRoot` (required): root export directory.
 - `-LogDir` (required): output logs/report directory.
+- Legacy compatibility: `-RunLogFile` / `-RunLogPath` are also accepted and treated as `-LogDir` (if a `.log` file is passed, its parent folder is used).
 - `-IncludeSubfolders` (switch): recursively export child folders.
 - `-DryRun` (switch): perform matching/reporting only, no message export.
 - `-TenantId` (optional): constrain sign-in to tenant.
