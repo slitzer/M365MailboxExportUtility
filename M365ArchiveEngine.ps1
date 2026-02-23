@@ -4,7 +4,12 @@ param(
     [Parameter(Mandatory=$true)][string] $CsvPath,
     [Parameter(Mandatory=$false)][string] $ClientMapPath = "",
     [Parameter(Mandatory=$true)][string] $OutRoot,
-    [Parameter(Mandatory=$true)][string] $LogDir,
+
+    # Accept common mistaken param names so the script doesn't hard-fail
+    [Parameter(Mandatory=$true)]
+    [Alias("logdir","logpath","runlogpath")]
+    [string] $LogDir,
+
     [switch] $IncludeSubfolders,
     [switch] $DryRun,
     [string] $TenantId = "",
@@ -12,6 +17,11 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+# If someone passed a log FILE path (e.g. C:\...\something.log), convert to its folder
+if ($LogDir -match '\.log$') {
+    $LogDir = Split-Path -Path $LogDir -Parent
+}
 
 # -----------------------------
 # Helpers
@@ -70,16 +80,11 @@ function Best-MatchFolderName([string]$targetName, [string[]]$candidateNames) {
         $cWords = $c.Split(' ') | Where-Object { $_ -ne "" }
         $score = ($tWords | Where-Object { $cWords -contains $_ }).Count
 
-        if ($score -gt $bestScore) {
-            $secondScore = $bestScore
-            $bestScore = $score
-            $bestName = $n
-        } elseif ($score -gt $secondScore) {
-            $secondScore = $score
-        }
+        if ($score -gt $bestScore) { $secondScore = $bestScore; $bestScore = $score; $bestName = $n }
+        elseif ($score -gt $secondScore) { $secondScore = $score }
     }
 
-    return [pscustomobject]@{
+    [pscustomobject]@{
         BestName  = $bestName
         BestScore = $bestScore
         Tie       = ($secondScore -eq $bestScore -and $bestScore -gt 0)
@@ -115,72 +120,62 @@ function Invoke-GraphPaged([string]$uri) {
     return $all
 }
 
-function Connect-Graph([string]$tenantId, [switch]$deviceCode, [string]$logPath) {
+function Connect-Graph([string]$tenantId, [switch]$deviceCode, [string]$runLogFile) {
     $required = @("Mail.Read","Mail.Read.Shared","MailboxSettings.Read")
 
-    # Reuse existing session if it already has scopes
+    # reuse if already connected
     $ctx = $null
     try { $ctx = Get-MgContext } catch {}
-
     if ($ctx -and $ctx.Scopes) {
         $missing = @($required | Where-Object { $ctx.Scopes -notcontains $_ })
         if ($missing.Count -eq 0) {
-            ("Reusing existing Graph session as: {0}" -f $ctx.Account) | Out-File $logPath -Append
-            ("Granted Scopes: {0}" -f (($ctx.Scopes | Sort-Object) -join ", ")) | Out-File $logPath -Append
+            ("Reusing Graph session: {0}" -f $ctx.Account) | Out-File $runLogFile -Append
+            ("Scopes: {0}" -f (($ctx.Scopes | Sort-Object) -join ", ")) | Out-File $runLogFile -Append
             return
         }
     }
 
-    # Otherwise connect
-    try {
-        if ($tenantId) {
-            if ($deviceCode) {
-                Connect-MgGraph -TenantId $tenantId -Scopes $required -UseDeviceCode -NoWelcome -ErrorAction Stop | Out-Null
-            } else {
-                Connect-MgGraph -TenantId $tenantId -Scopes $required -NoWelcome -ErrorAction Stop | Out-Null
-            }
+    # connect
+    if ($tenantId) {
+        if ($deviceCode) {
+            Connect-MgGraph -TenantId $tenantId -Scopes $required -UseDeviceCode -NoWelcome -ErrorAction Stop | Out-Null
         } else {
-            if ($deviceCode) {
-                Connect-MgGraph -Scopes $required -UseDeviceCode -NoWelcome -ErrorAction Stop | Out-Null
-            } else {
-                Connect-MgGraph -Scopes $required -NoWelcome -ErrorAction Stop | Out-Null
-            }
+            Connect-MgGraph -TenantId $tenantId -Scopes $required -NoWelcome -ErrorAction Stop | Out-Null
         }
-
-        $ctx = Get-MgContext
-        ("Connected Account: {0}" -f $ctx.Account) | Out-File $logPath -Append
-        ("Granted Scopes: {0}" -f (($ctx.Scopes | Sort-Object) -join ", ")) | Out-File $logPath -Append
-    } catch {
-        ("AUTH FAILED: " + $_.Exception.Message) | Out-File $logPath -Append
-        throw
+    } else {
+        if ($deviceCode) {
+            Connect-MgGraph -Scopes $required -UseDeviceCode -NoWelcome -ErrorAction Stop | Out-Null
+        } else {
+            Connect-MgGraph -Scopes $required -NoWelcome -ErrorAction Stop | Out-Null
+        }
     }
+
+    $ctx = Get-MgContext
+    ("Connected Graph session: {0}" -f $ctx.Account) | Out-File $runLogFile -Append
+    ("Scopes: {0}" -f (($ctx.Scopes | Sort-Object) -join ", ")) | Out-File $runLogFile -Append
 }
 
 function Get-RootFolderIdByName([string]$mailbox, [string]$displayName) {
     $folders = Invoke-GraphPaged "/users/$mailbox/mailFolders?`$top=200"
-    $match = $folders | Where-Object { $_.displayName -eq $displayName } | Select-Object -First 1
-    if ($match) { return $match.id }
-    return $null
+    ($folders | Where-Object { $_.displayName -eq $displayName } | Select-Object -First 1).id
 }
 
 function Get-ChildFolders([string]$mailbox, [string]$parentId) {
-    return Invoke-GraphPaged "/users/$mailbox/mailFolders/$parentId/childFolders?`$top=200"
+    Invoke-GraphPaged "/users/$mailbox/mailFolders/$parentId/childFolders?`$top=200"
 }
 
 function Get-FolderByPath([string]$mailbox, [string]$path) {
     $parts = $path.Split('\') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
     if ($parts.Count -lt 1) { return $null }
 
-    $rootName = $parts[0]
-    $rootId = Get-RootFolderIdByName $mailbox $rootName
+    $rootId = Get-RootFolderIdByName $mailbox $parts[0]
     if (-not $rootId) { return $null }
 
-    $current = [pscustomobject]@{ id=$rootId; displayName=$rootName }
+    $current = [pscustomobject]@{ id=$rootId; displayName=$parts[0] }
 
     for ($i=1; $i -lt $parts.Count; $i++) {
-        $want = $parts[$i]
         $kids = Get-ChildFolders $mailbox $current.id
-        $next = $kids | Where-Object { $_.displayName -eq $want } | Select-Object -First 1
+        $next = $kids | Where-Object { $_.displayName -eq $parts[$i] } | Select-Object -First 1
         if (-not $next) { return $null }
         $current = $next
     }
@@ -204,13 +199,12 @@ function Get-AllFoldersBFS([string]$mailbox, [string]$rootId, [int]$maxDepth) {
             $queue.Enqueue([pscustomobject]@{ Id=$k.id; Depth=($node.Depth+1); Path=$p })
         }
     }
-
     return $results
 }
 
 function Find-ProjectFolderUnderClient([string]$mailbox, [string]$clientFolderId, [string]$projectNumber) {
     $kids = Get-ChildFolders $mailbox $clientFolderId
-    return @($kids | Where-Object { $_.displayName -match ("^\s*" + [regex]::Escape($projectNumber) + "\b") })
+    @($kids | Where-Object { $_.displayName -match ("^\s*" + [regex]::Escape($projectNumber) + "\b") })
 }
 
 function Export-FolderMessages([string]$mailbox, [string]$folderId, [string]$destPath, [switch]$Recurse) {
@@ -225,14 +219,11 @@ function Export-FolderMessages([string]$mailbox, [string]$folderId, [string]$des
         $dt = "00000000-000000"
         try { $dt = ([DateTime]$m.receivedDateTime).ToString("yyyyMMdd-HHmmss") } catch {}
         $subj = Safe-FileName $m.subject
-        $emlName = "$dt - $subj.eml"
-        $emlPath = Join-Path $msgDir $emlName
+        $emlPath = Join-Path $msgDir ("$dt - $subj.eml")
 
-        # MIME to file
         $mimeUri = Ensure-V1 "/users/$mailbox/messages/$($m.id)/`$value"
         Invoke-MgGraphRequest -Method GET -Uri $mimeUri -OutputFilePath $emlPath | Out-Null
 
-        # Attachments list (may not contain contentBytes)
         $atts = Invoke-GraphPaged "/users/$mailbox/messages/$($m.id)/attachments?`$top=50&`$select=id,name,@odata.type,contentBytes"
         if (@($atts).Count -gt 0) {
             $msgAttDir = Join-Path $attDir (Safe-FileName $m.id)
@@ -240,7 +231,6 @@ function Export-FolderMessages([string]$mailbox, [string]$folderId, [string]$des
 
             foreach ($a in @($atts)) {
                 if ($a.'@odata.type' -ne "#microsoft.graph.fileAttachment") { continue }
-
                 $fn = Safe-FileName $a.name
                 $p  = Join-Path $msgAttDir $fn
 
@@ -248,12 +238,9 @@ function Export-FolderMessages([string]$mailbox, [string]$folderId, [string]$des
                 if ($a.contentBytes) {
                     $bytes = [Convert]::FromBase64String($a.contentBytes)
                 } else {
-                    # Fetch attachment details to get contentBytes
-                    $attUri = Ensure-V1 "/users/$mailbox/messages/$($m.id)/attachments/$($a.id)?`$select=contentBytes,name,@odata.type"
+                    $attUri = Ensure-V1 "/users/$mailbox/messages/$($m.id)/attachments/$($a.id)?`$select=contentBytes"
                     $attObj = Invoke-MgGraphRequest -Method GET -Uri $attUri
-                    if ($attObj.contentBytes) {
-                        $bytes = [Convert]::FromBase64String($attObj.contentBytes)
-                    }
+                    if ($attObj.contentBytes) { $bytes = [Convert]::FromBase64String($attObj.contentBytes) }
                 }
 
                 if ($bytes) { [IO.File]::WriteAllBytes($p, $bytes) }
@@ -279,22 +266,22 @@ Ensure-Dir $OutRoot
 $MailboxUPN = $MailboxUPN.ToLowerInvariant()
 
 $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
-$logPath     = Join-Path $LogDir "M365Export-$stamp.log"
+$runLogFile  = Join-Path $LogDir "M365Export-$stamp.log"
 $wouldCsv    = Join-Path $LogDir "WouldExport-$stamp.csv"
 $exportedCsv = Join-Path $LogDir "Exported-$stamp.csv"
 $skippedCsv  = Join-Path $LogDir "Skipped-$stamp.csv"
 
-"=== Run started: $(Get-Date) ===" | Out-File $logPath -Append
-"MailboxUPN: $MailboxUPN" | Out-File $logPath -Append
-"RootFolderPath: $RootFolderPath" | Out-File $logPath -Append
-"CsvPath: $CsvPath" | Out-File $logPath -Append
-"ClientMapPath: $ClientMapPath" | Out-File $logPath -Append
-"OutRoot: $OutRoot" | Out-File $logPath -Append
-"LogDir: $LogDir" | Out-File $logPath -Append
-"IncludeSubfolders: $IncludeSubfolders" | Out-File $logPath -Append
-"DryRun: $DryRun" | Out-File $logPath -Append
-"TenantId: $TenantId" | Out-File $logPath -Append
-"UseDeviceCode: $UseDeviceCode" | Out-File $logPath -Append
+"=== Run started: $(Get-Date) ===" | Out-File $runLogFile -Append
+"MailboxUPN: $MailboxUPN" | Out-File $runLogFile -Append
+"RootFolderPath: $RootFolderPath" | Out-File $runLogFile -Append
+"CsvPath: $CsvPath" | Out-File $runLogFile -Append
+"ClientMapPath: $ClientMapPath" | Out-File $runLogFile -Append
+"OutRoot: $OutRoot" | Out-File $runLogFile -Append
+"LogDir: $LogDir" | Out-File $runLogFile -Append
+"IncludeSubfolders: $IncludeSubfolders" | Out-File $runLogFile -Append
+"DryRun: $DryRun" | Out-File $runLogFile -Append
+"TenantId: $TenantId" | Out-File $runLogFile -Append
+"UseDeviceCode: $UseDeviceCode" | Out-File $runLogFile -Append
 
 if (!(Test-Path $CsvPath)) { throw "CSV not found: $CsvPath" }
 
@@ -314,11 +301,8 @@ $would    = @()
 $exported = @()
 $skipped  = @()
 
-# -----------------------------
-# Connect + folder cache
-# -----------------------------
 Ensure-GraphModule
-Connect-Graph -tenantId $TenantId -deviceCode:$UseDeviceCode -logPath $logPath
+Connect-Graph -tenantId $TenantId -deviceCode:$UseDeviceCode -runLogFile $runLogFile
 
 $rootFolder = Get-FolderByPath -mailbox $MailboxUPN -path $RootFolderPath
 if (-not $rootFolder) { throw "Could not find root folder path in mailbox: '$RootFolderPath'" }
@@ -364,6 +348,7 @@ foreach ($r in $rows) {
             }
             continue
         }
+
         $clientFolder = $clientCandidates | Where-Object { $_.displayName -eq $bm.BestName } | Select-Object -First 1
         $wantedClientFolderName = $bm.BestName
     }
@@ -418,14 +403,14 @@ foreach ($r in $rows) {
             MailFolderPath=$mailPath; LocalPath=$localProj; Status="Exported"
         }
         $summary.ExportedCount++
-        "Exported: $mailPath -> $localProj" | Out-File $logPath -Append
+        "Exported: $mailPath -> $localProj" | Out-File $runLogFile -Append
     } catch {
         $summary.FailedCount++
         $skipped += [pscustomobject]@{
             Category=$category; ClientName=$clientName; ProjectNumber=$projNo; ProjectTitle=$projTitle;
             MailFolderPath=$mailPath; LocalPath=$localProj; SkipReason=("Export failed: " + $_.Exception.Message)
         }
-        "FAILED: $mailPath -> $localProj :: $($_.Exception.Message)" | Out-File $logPath -Append
+        "FAILED: $mailPath -> $localProj :: $($_.Exception.Message)" | Out-File $runLogFile -Append
     }
 }
 
@@ -435,14 +420,14 @@ $would    | Export-Csv -NoTypeInformation -Encoding UTF8 $wouldCsv
 $exported | Export-Csv -NoTypeInformation -Encoding UTF8 $exportedCsv
 $skipped  | Export-Csv -NoTypeInformation -Encoding UTF8 $skippedCsv
 
-"=== Summary ===" | Out-File $logPath -Append
-$summary.GetEnumerator() | ForEach-Object { "$($_.Key): $($_.Value)" | Out-File $logPath -Append }
-"WouldExport report: $wouldCsv" | Out-File $logPath -Append
-"Exported report: $exportedCsv" | Out-File $logPath -Append
-"Skipped report: $skippedCsv" | Out-File $logPath -Append
-"=== Run ended: $(Get-Date) ===" | Out-File $logPath -Append
+"=== Summary ===" | Out-File $runLogFile -Append
+$summary.GetEnumerator() | ForEach-Object { "$($_.Key): $($_.Value)" | Out-File $runLogFile -Append }
+"WouldExport report: $wouldCsv" | Out-File $runLogFile -Append
+"Exported report: $exportedCsv" | Out-File $runLogFile -Append
+"Skipped report: $skippedCsv" | Out-File $runLogFile -Append
+"=== Run ended: $(Get-Date) ===" | Out-File $runLogFile -Append
 
 Write-Host ("RESULT|Log={0}|Would={1}|Exported={2}|Skipped={3}|Total={4}|WouldCount={5}|ExportedCount={6}|SkippedCount={7}|Ambiguous={8}|Failed={9}" -f `
-    $logPath, $wouldCsv, $exportedCsv, $skippedCsv, `
+    $runLogFile, $wouldCsv, $exportedCsv, $skippedCsv, `
     $summary.TotalRows, $summary.WouldExportCount, $summary.ExportedCount, $summary.SkippedCount, $summary.Skipped_Ambiguous, $summary.FailedCount
 )
