@@ -17,19 +17,13 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-# If someone passed a log FILE path (e.g. C:\...\something.log), convert to its folder.
-if ($LogDir -match '\.log$') {
-    $LogDir = Split-Path -Path $LogDir -Parent
-}
-
-if ([string]::IsNullOrWhiteSpace($LogDir)) {
-    throw "Missing required log output path. Provide -LogDir (or legacy aliases -LogDir/-RunLogPath)."
-}
-
 # -----------------------------
 # Helpers
 # -----------------------------
-function Ensure-Dir([string]$p) { if (!(Test-Path $p)) { New-Item -ItemType Directory -Path $p -Force | Out-Null } }
+function Ensure-Dir([string]$p) {
+    if ([string]::IsNullOrWhiteSpace($p)) { return }
+    if (!(Test-Path $p)) { New-Item -ItemType Directory -Path $p -Force | Out-Null }
+}
 
 function Get-FieldString($Row, [string]$FieldName) {
     $v = $Row.$FieldName
@@ -94,6 +88,43 @@ function Best-MatchFolderName([string]$targetName, [string[]]$candidateNames) {
     }
 }
 
+function Normalize-TenantId([string]$t) {
+    $t = ([string]$t).Trim()
+
+    # strip invisible unicode chars (zero-width, BOM, etc.)
+    $t = $t -replace '[\u200B-\u200F\uFEFF]', ''
+    $t = $t.Trim().Trim('{}').Trim()
+
+    # canonicalize GUID if possible
+    $g = [guid]::Empty
+    if ([guid]::TryParse($t, [ref]$g)) { return $g.ToString() }
+
+    # otherwise allow domains like contoso.onmicrosoft.com
+    return $t
+}
+
+function Normalize-LogDir([string]$p) {
+    $p = ([string]$p).Trim()
+    $p = $p -replace '[\u200B-\u200F\uFEFF]', ''
+    $p = $p.Trim().Trim('"').Trim()
+    return $p
+}
+
+# -----------------------------
+# Parameter normalization
+# -----------------------------
+$LogDir   = Normalize-LogDir $LogDir
+$TenantId = Normalize-TenantId $TenantId
+
+# If someone passed a log FILE path (e.g. C:\...\something.log), convert to its folder.
+if ($LogDir -match '\.log$') {
+    $LogDir = Split-Path -Path $LogDir -Parent
+}
+
+if ([string]::IsNullOrWhiteSpace($LogDir)) {
+    throw "Missing required log output path. Provide -LogDir (or legacy aliases like -runlogfile/-runlogpath)."
+}
+
 # -----------------------------
 # Graph helpers
 # -----------------------------
@@ -123,17 +154,20 @@ function Invoke-GraphPaged([string]$uri) {
     return $all
 }
 
-function Connect-Graph([string]$tenantId, [switch]$deviceCode, [string]$runLogFile) {
+function Connect-Graph([string]$tenantId, [switch]$deviceCode) {
     $required = @("Mail.Read","Mail.Read.Shared","MailboxSettings.Read")
+    $tenantId = Normalize-TenantId $tenantId
 
-    # reuse if already connected
+    ("TenantId used: [{0}] len={1}" -f $tenantId, ([string]$tenantId).Length) | Out-File $script:runLogFile -Append
+
+    # reuse if already connected with required scopes
     $ctx = $null
     try { $ctx = Get-MgContext } catch {}
     if ($ctx -and $ctx.Scopes) {
         $missing = @($required | Where-Object { $ctx.Scopes -notcontains $_ })
         if ($missing.Count -eq 0) {
-            ("Reusing Graph session: {0}" -f $ctx.Account) | Out-File $runLogFile -Append
-            ("Scopes: {0}" -f (($ctx.Scopes | Sort-Object) -join ", ")) | Out-File $runLogFile -Append
+            ("Reusing Graph session: {0}" -f $ctx.Account) | Out-File $script:runLogFile -Append
+            ("Scopes: {0}" -f (($ctx.Scopes | Sort-Object) -join ", ")) | Out-File $script:runLogFile -Append
             return
         }
     }
@@ -154,8 +188,8 @@ function Connect-Graph([string]$tenantId, [switch]$deviceCode, [string]$runLogFi
     }
 
     $ctx = Get-MgContext
-    ("Connected Graph session: {0}" -f $ctx.Account) | Out-File $runLogFile -Append
-    ("Scopes: {0}" -f (($ctx.Scopes | Sort-Object) -join ", ")) | Out-File $runLogFile -Append
+    ("Connected Graph session: {0}" -f $ctx.Account) | Out-File $script:runLogFile -Append
+    ("Scopes: {0}" -f (($ctx.Scopes | Sort-Object) -join ", ")) | Out-File $script:runLogFile -Append
 }
 
 function Get-RootFolderIdByName([string]$mailbox, [string]$displayName) {
@@ -261,7 +295,7 @@ function Export-FolderMessages([string]$mailbox, [string]$folderId, [string]$des
 }
 
 # -----------------------------
-# Logging
+# Logging + run setup
 # -----------------------------
 Ensure-Dir $LogDir
 Ensure-Dir $OutRoot
@@ -283,7 +317,7 @@ $skippedCsv  = Join-Path $LogDir "Skipped-$stamp.csv"
 "LogDir: $LogDir" | Out-File $runLogFile -Append
 "IncludeSubfolders: $IncludeSubfolders" | Out-File $runLogFile -Append
 "DryRun: $DryRun" | Out-File $runLogFile -Append
-"TenantId: $TenantId" | Out-File $runLogFile -Append
+("TenantId(raw normalized): [{0}] len={1}" -f $TenantId, ([string]$TenantId).Length) | Out-File $runLogFile -Append
 "UseDeviceCode: $UseDeviceCode" | Out-File $runLogFile -Append
 
 if (!(Test-Path $CsvPath)) { throw "CSV not found: $CsvPath" }
@@ -305,7 +339,7 @@ $exported = @()
 $skipped  = @()
 
 Ensure-GraphModule
-Connect-Graph $TenantId -deviceCode:$UseDeviceCode $runLogFile
+Connect-Graph -tenantId $TenantId -deviceCode:$UseDeviceCode
 
 $rootFolder = Get-FolderByPath -mailbox $MailboxUPN -path $RootFolderPath
 if (-not $rootFolder) { throw "Could not find root folder path in mailbox: '$RootFolderPath'" }
