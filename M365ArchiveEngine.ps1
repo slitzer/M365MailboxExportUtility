@@ -23,7 +23,7 @@ if ($LogDir -match '\.log$') {
 }
 
 if ([string]::IsNullOrWhiteSpace($LogDir)) {
-    throw "Missing required log output path. Provide -LogDir (or legacy aliases -RunLogFile/-RunLogPath)."
+    throw "Missing required log output path. Provide -LogDir (or legacy aliases -LogDir/-RunLogPath)."
 }
 
 # -----------------------------
@@ -305,7 +305,7 @@ $exported = @()
 $skipped  = @()
 
 Ensure-GraphModule
-Connect-Graph -tenantId $TenantId -deviceCode:$UseDeviceCode -runLogFile $runLogFile
+Connect-Graph $TenantId -deviceCode:$UseDeviceCode $runLogFile
 
 $rootFolder = Get-FolderByPath -mailbox $MailboxUPN -path $RootFolderPath
 if (-not $rootFolder) { throw "Could not find root folder path in mailbox: '$RootFolderPath'" }
