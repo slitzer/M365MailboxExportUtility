@@ -76,7 +76,16 @@ function Load-ClientMap([string]$path) {
     if ($path -and (Test-Path $path)) {
         @(Import-Csv $path) | ForEach-Object {
             $cn = if ($_.ClientName) { $_.ClientName.Trim() } else { "" }
-            $fn = if ($_.FolderName) { $_.FolderName.Trim() } else { "" }
+            $fn = if ($_.PSObject.Properties.Name -contains "DestinationFolderName" -and $_.DestinationFolderName) {
+                $_.DestinationFolderName.Trim()
+            }
+            elseif ($_.PSObject.Properties.Name -contains "FolderName" -and $_.FolderName) {
+                $_.FolderName.Trim()
+            }
+            elseif ($_.PSObject.Properties.Name -contains "SourceFolderName" -and $_.SourceFolderName) {
+                $_.SourceFolderName.Trim()
+            }
+            else { "" }
             if ($cn -and $fn) { $map[$cn] = $fn }
         }
     }

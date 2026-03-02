@@ -279,13 +279,14 @@ function P1-SuggestMappings {
         }
         $out += [pscustomobject]@{
             Use=$true; ClientName=$cn
-            FolderName=$(if ($best) { $best } else { "" })
+            SourceFolderName=$cn
+            DestinationFolderName=$(if ($best) { $best } else { "" })
             SuggestedFolder=$(if ($best) { $best } else { "(not found)" })
             Score=$bestScore; Tie=$false
         }
     }
     $script:p1GridMappings.ItemsSource = @($out)
-    $script:p1MapStatus.Text = "Loaded $($out.Count) suggestion(s). Edit FolderName then click Append."
+    $script:p1MapStatus.Text = "Loaded $($out.Count) suggestion(s). Edit Source/Dest names then click Append."
 }
 function P1-AppendMappings {
     $mapPath = $script:p1TxtMap.Text.Trim()
