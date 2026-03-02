@@ -68,7 +68,7 @@ Used to force exact client-folder mapping when mailbox folder names do not match
 Columns:
 
 - `ClientName`
-- `FolderName`
+- `FolderName` (legacy) **or** `SourceFolderName` + `DestinationFolderName`
 
 Example:
 
@@ -76,6 +76,11 @@ Example:
 ClientName,FolderName
 Contoso Pty Ltd,Contoso
 Fabrikam Limited,Fabrikam Group
+
+# or (new UI format)
+ClientName,SourceFolderName,DestinationFolderName
+Contoso Pty Ltd,Contoso Pty Ltd,Contoso
+Fabrikam Limited,Fabrikam Limited,Fabrikam Group
 ```
 
 ## Running the engine directly
