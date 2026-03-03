@@ -1,183 +1,189 @@
-# M365 Mailbox Export Utility
+# M365 Mailbox & File Archive Utility
 
-PowerShell utility for exporting project-specific Microsoft 365 mailbox folders to local disk as:
+This repository contains a two-phase PowerShell workflow:
 
-- `.eml` message files
-- extracted file attachments
-- run reports (`WouldExport`, `Exported`, `Skipped`) and detailed logs
+1. **File-server archival** of completed project folders.
+2. **Microsoft 365 email export** for project mail folders.
 
-The repository contains:
+It includes a standalone engine for each phase plus a unified WPF desktop UI.
 
-- `M365ArchiveEngine.ps1`: non-UI export engine that talks to Microsoft Graph.
-- `M365ArchiveUI.ps1`: WPF desktop UI wrapper that launches the engine in a separate PowerShell window.
+## Repository contents
 
-## How it works
+- `FileArchiveEngine.ps1`
+  - Moves project folders from an active file root to an archive root using `robocopy /MOVE`.
+  - Produces run log + CSV reports: `WouldMove`, `Moved`, `Skipped`.
+  - Supports dry-run preview mode.
 
-1. Reads a projects CSV (required columns include `Project Number` and `Client Name`).
-2. Connects to Microsoft Graph (delegated sign-in).
-3. Resolves a mailbox root folder path (for example `ClientDATA Emails`).
-4. Locates client folders under that root (with optional client-name mapping CSV and fuzzy fallback matching).
-5. Finds project folders under each client by project number prefix.
-6. Exports folder messages and attachments to local folders.
-7. Writes log + CSV summaries.
+- `Export-ProjectEmails.ps1`
+  - Exports project emails from a mailbox to `.eml` files using Microsoft Graph.
+  - Groups emails by conversation thread inside each project folder.
+  - Supports date filtering and `-WhatIf` dry run.
 
-## Requirements
+- `UnifiedArchiveUI.ps1`
+  - WPF desktop UI that orchestrates both phases.
+  - Phase 1: run archive dry/live, preview skipped rows, suggest/append client-folder mappings.
+  - Phase 2: interactive Graph auth window, then in-UI live export output with cancel support.
+  - Supports Light/Dark theme toggle.
 
-- Windows PowerShell 5.1+
-- Microsoft Graph PowerShell module (`Microsoft.Graph.Authentication`)
-- Delegated Graph permissions:
-  - `Mail.Read`
-  - `Mail.Read.Shared`
-  - `MailboxSettings.Read`
-- Access to target mailbox and folders
+---
 
-Install Graph module (CurrentUser scope):
+## Phase 1: File server archive (`FileArchiveEngine.ps1`)
 
-```powershell
-Install-Module Microsoft.Graph -Scope CurrentUser
-```
+### What it does
 
-## Input files
+For each project in your CSV:
 
-### 1) Projects CSV (required)
+- Resolves the client folder under `-ActiveRoot`.
+- Finds project folders that start with the project number.
+- Plans or performs move to matching path under `-ArchiveRoot`.
 
-The engine reads this CSV via `-CsvPath`.
+### Matching behavior
 
-Required columns used by logic:
+Client folder resolution order:
 
-- `Project Number`
-- `Client Name`
+1. Exact map from `-ClientMapPath` (if provided).
+2. Exact folder name match.
+3. Fuzzy token overlap match (ignores common suffixes like `Ltd`, `Pty`, `Inc`, etc.).
 
-Optional columns used in output/reporting:
+Project folder matching:
 
-- `Project Title`
-- `Category`
+- Regex prefix match on folder name: `^\s*<ProjectNumber>\b`.
 
-Example:
+### Inputs
 
-```csv
-Category,Client Name,Project Number,Project Title
-Litigation,Contoso Pty Ltd,12345,Employment Matter
-Advisory,Fabrikam Limited,88771,Tax Review
-```
+- `-ActiveRoot` (required)
+- `-ArchiveRoot` (required)
+- `-CsvPath` (required)
+- `-OutDir` (required)
+- `-ClientMapPath` (optional)
+- `-DryRun` (switch)
 
-### 2) Client map CSV (optional)
+Expected CSV columns:
 
-Used to force exact client-folder mapping when mailbox folder names do not match CSV names.
+- Required: `Project Number`, `Client Name`
+- Optional (reported): `Project Title`, `Category`
 
-Columns:
+Optional client map CSV supports:
 
-- `ClientName`
-- `FolderName` (legacy) **or** `SourceFolderName` + `DestinationFolderName`
+- `ClientName,FolderName`
+- or `ClientName,SourceFolderName,DestinationFolderName`
 
-Example:
+### Outputs
 
-```csv
-ClientName,FolderName
-Contoso Pty Ltd,Contoso
-Fabrikam Limited,Fabrikam Group
+In `-OutDir` per run:
 
-# or (new UI format)
-ClientName,SourceFolderName,DestinationFolderName
-Contoso Pty Ltd,Contoso Pty Ltd,Contoso
-Fabrikam Limited,Fabrikam Limited,Fabrikam Group
-```
+- `FileArchive-<timestamp>.log`
+- `WouldMove-<timestamp>.csv`
+- `Moved-<timestamp>.csv`
+- `Skipped-<timestamp>.csv`
 
-## Running the engine directly
+Also writes a console summary line beginning with `RESULT|...`.
+
+### Example
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\M365ArchiveEngine.ps1 \
-  -MailboxUPN "clientdata@yourdomain.com" \
-  -RootFolderPath "ClientDATA Emails" \
+powershell -NoProfile -ExecutionPolicy Bypass -File .\FileArchiveEngine.ps1 \
+  -ActiveRoot "P:\" \
+  -ArchiveRoot "A:\" \
   -CsvPath "C:\TRANSFERSCRIPT\ProjectsToArchive.csv" \
   -ClientMapPath "C:\TRANSFERSCRIPT\ClientFolderMap.csv" \
-  -OutRoot "C:\Temp\M365Export" \
-  -LogDir "C:\TRANSFERSCRIPT\Logs" \
-  -UseDeviceCode \
-  -IncludeSubfolders \
+  -OutDir "C:\TRANSFERSCRIPT\Logs" \
   -DryRun
 ```
 
-### Parameters
+---
 
-- `-MailboxUPN` (required): mailbox user principal name.
-- `-RootFolderPath` (required): mailbox folder path from root, separated by `\`.
-- `-CsvPath` (required): projects CSV path.
-- `-ClientMapPath` (optional): mapping CSV path.
-- `-OutRoot` (required): root export directory.
-- `-LogDir` (required): output logs/report directory.
-- Legacy compatibility: `-RunLogFile` / `-RunLogPath` are also accepted and treated as `-LogDir` (if a `.log` file is passed, its parent folder is used).
-- `-IncludeSubfolders` (switch): recursively export child folders.
-- `-DryRun` (switch): perform matching/reporting only, no message export.
-- `-TenantId` (optional): constrain sign-in to tenant.
-- `-UseDeviceCode` (switch): use device-code auth flow.
+## Phase 2: M365 email export (`Export-ProjectEmails.ps1`)
 
-## Running the UI
+### What it does
+
+For each project in your CSV:
+
+- Scans mailbox folders up to `-FolderMatchDepth`.
+- Finds best project folder match by project number.
+- Exports messages as MIME `.eml` files.
+- Organizes output by:
+  - `<OutputFolder>\<Client Name>\<ProjectNumber - ProjectTitle>\<Date - Thread Subject>\*.eml`
+
+### Key behavior
+
+- Supports `-WhatIf` dry-run through PowerShell ShouldProcess.
+- Supports optional date filters:
+  - `-StartDate yyyy-MM-dd`
+  - `-EndDate yyyy-MM-dd`
+- Attempts automatic Graph module installation if missing.
+- Auto-connects to Graph with `Mail.ReadWrite` if not already connected.
+- Includes diagnostics for messages that cannot be exported as MIME.
+
+### Inputs
+
+- `-MailboxUserId` (required; UPN or GUID)
+- `-CsvPath` (required)
+- `-OutputFolder` (required)
+- `-StartDate` (optional)
+- `-EndDate` (optional)
+- `-FolderMatchDepth` (optional, default `3`)
+- `-WhatIf` (common switch)
+
+### Requirements
+
+- PowerShell **7.3.4+**
+- Microsoft Graph modules:
+  - `Microsoft.Graph.Authentication` (>= 2.0.0)
+  - `Microsoft.Graph.Mail` (>= 2.0.0)
+- Graph delegated scope: `Mail.ReadWrite`
+
+### Example
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\M365ArchiveUI.ps1
+pwsh -NoProfile -File .\Export-ProjectEmails.ps1 \
+  -MailboxUserId "user@company.com" \
+  -CsvPath "C:\TRANSFERSCRIPT\ProjectsToArchive.csv" \
+  -OutputFolder "C:\TRANSFERSCRIPT\M365Export" \
+  -FolderMatchDepth 3 \
+  -WhatIf
 ```
 
-Notes:
+---
 
-- The UI launches engine runs in a **separate visible PowerShell window** so Graph auth prompts are visible.
-- After completion, use **Preview → Load Latest** to load newest CSV/log outputs.
-- UI currently has a hard-coded engine path:
+## Unified desktop UI (`UnifiedArchiveUI.ps1`)
+
+Run:
 
 ```powershell
-$script:EnginePath = "C:\TRANSFERSCRIPT\M365ArchiveEngine.ps1"
+powershell -NoProfile -ExecutionPolicy Bypass -File .\UnifiedArchiveUI.ps1
 ```
 
-If running from another location, update that path in `M365ArchiveUI.ps1`.
+### UI highlights
 
-## Output structure
+- **Auto engine discovery**: checks script directory first, then `C:\TRANSFERSCRIPT`.
+- **Phase 1 tab**:
+  - Dry run / live move.
+  - Log browser and CSV preview grids.
+  - Skip reason aggregation.
+  - Mapping suggestion + append-to-map workflow.
+- **Phase 2 tab**:
+  - Dry run (`-WhatIf`) or live export.
+  - Separate auth window for Graph sign-in, then streamed output in UI.
+  - Cancel button for in-progress auth/export process.
+- Theme toggle: **Light** / **Dark**.
 
-Under `-OutRoot`, exports are written as:
+### UI requirement
 
-```text
-<OutRoot>\<ClientFolder>\<ProjectFolder>\
-  Messages\
-    <yyyyMMdd-HHmmss - Subject>.eml
-  Attachments\
-    <MessageId>\
-      <attachment files>
-```
+- Windows PowerShell 5.1+ (WPF + WinForms assemblies).
 
-In `-LogDir`, each run writes:
+---
 
-- `M365Export-<timestamp>.log`
-- `WouldExport-<timestamp>.csv`
-- `Exported-<timestamp>.csv`
-- `Skipped-<timestamp>.csv`
+## Practical workflow
 
-The engine also writes a final single-line summary to console beginning with `RESULT|...`.
+1. Prepare `ProjectsToArchive.csv` with at least `Project Number` and `Client Name`.
+2. Run **Phase 1 dry run** and resolve skipped client mappings.
+3. Run **Phase 1 live move** when preview is correct.
+4. Run **Phase 2 dry run (`-WhatIf`)** to validate email folder matching.
+5. Run **Phase 2 live export**.
 
-## Matching behavior and skip reasons
+## Security notes
 
-- Client resolution order:
-  1. Exact map lookup from `ClientMapPath` (if provided)
-  2. Exact folder-name match
-  3. Fuzzy token overlap match (ignores common business suffixes like `Ltd`, `Pty`, `Inc`, etc.)
-- Ambiguous fuzzy ties are skipped and reported.
-- Project folders are matched under client by regex prefix:
-  - folder name starts with project number (`^\s*<Project Number>\b`)
-- Common skip reasons:
-  - missing required CSV fields
-  - no client folder found
-  - ambiguous client folder match
-  - project folder not found
-  - multiple project folders match (ambiguous)
-  - export failure
-
-## Troubleshooting
-
-- **Graph module missing**: install `Microsoft.Graph` module.
-- **Auth popup not appearing**: use `-UseDeviceCode` or run through UI which launches a visible PowerShell window.
-- **Folder path not found**: verify exact mailbox folder path and backslash separators.
-- **Unexpected skips**: inspect `Skipped-*.csv` and provide `ClientFolderMap.csv` mappings for edge cases.
-- **Attachment gaps**: non-file attachments (item/reference) are intentionally skipped; only `fileAttachment` is saved.
-
-## Security / operational notes
-
-- Exports can contain sensitive mailbox data. Protect `OutRoot` and `LogDir` with appropriate access controls.
-- Run with least privilege and only on authorized mailboxes.
+- Exports and moved content may contain sensitive client data.
+- Restrict access to output/log locations.
+- Use least-privilege Graph permissions and authorized mailboxes only.
